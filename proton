@@ -37,6 +37,7 @@ from ctypes import c_size_t
 from ctypes import c_ssize_t
 
 from filelock import FileLock
+from proton_speedhack import speedhack_env
 from random import randrange
 
 #To enable debug logging, copy "user_settings.sample.py" to "user_settings.py"
@@ -2072,6 +2073,8 @@ class Session:
                 s = dll + "=" + setting
         append_to_env_str(self.env, "WINEDLLOVERRIDES", s, ";")
 
+        self.env.update(speedhack_env(self.env, g_proton.base_dir, self.speedhack_log))
+
         if platform.machine() == 'aarch64':
             if os.environ.get("SteamGameId", 0) == "1167630": # Teardown
                 # https://github.com/microsoft/mimalloc/issues/958
@@ -2085,6 +2088,10 @@ class Session:
                 self.env['FEX_APP_CONFIG'] = g_compatdata.fex_config_file
 
             self.env["FEX_APP_CONFIG_LOCATION"] = os.path.join(g_proton.dist_dir, "share/fex-emu/")
+
+    def speedhack_log(self, msg):
+        if self.log_file:
+            self.log_file.write(msg + "\n")
 
     def run_proc(self, args, local_env=None):
         if local_env is None:

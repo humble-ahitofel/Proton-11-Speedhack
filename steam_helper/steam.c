@@ -913,6 +913,104 @@ BOOL is_ptraced(void)
     return !!pid;
 }
 
+/*
+ * Proton SpeedHack hotkey thread.
+ *
+ * The proton script resolves the user configuration (environment variables and
+ * JSON files) and passes it to us through the following variables:
+ *
+ *   PROTON_SPEEDHACK_MULTIPLIER  speed while active, in 1/1000 units (2500 = 2.5x)
+ *   PROTON_SPEEDHACK_TOGGLE      1: a key press toggles the speedhack, 0: hold to activate
+ *   PROTON_SPEEDHACK_KEYS        comma separated list of up to 4 virtual key codes
+ *                                which all have to be held down (e.g. "0x10,0x21")
+ *
+ * Key state is read with GetAsyncKeyState(), which sees keys pressed in any window
+ * of the prefix desktop, including keys emitted by Steam Input controller bindings.
+ * The speed itself is applied by the wineserver for the whole prefix through the
+ * Wine-private NtSetSystemInformation class below (see patches/wine in the Proton
+ * SpeedHack repository); keep both definitions in sync.
+ */
+#define SystemWineSpeedhackInformation 0x5348
+#define SPEEDHACK_MULTIPLIER_ONE 1000
+#define SPEEDHACK_MAX_KEYS 4
+
+struct speedhack_info
+{
+    ULONG multiplier;       /* [in] speed in 1/1000 units (1000 = 1x), 0 to only query */
+    ULONG prev_multiplier;  /* [out] previous speed in 1/1000 units */
+};
+
+static BOOL speedhack_set_multiplier( ULONG multiplier )
+{
+    struct speedhack_info info = { multiplier, 0 };
+    NTSTATUS status;
+
+    status = NtSetSystemInformation( SystemWineSpeedhackInformation, &info, sizeof(info) );
+    if (status)
+    {
+        WINE_ERR( "Failed to set speedhack multiplier %lu, status %#lx.\n", multiplier, status );
+        return FALSE;
+    }
+    WINE_TRACE( "Speedhack multiplier %lu -> %lu.\n", info.prev_multiplier, multiplier );
+    return TRUE;
+}
+
+static DWORD WINAPI speedhack_thread( void *arg )
+{
+    ULONG multiplier = SPEEDHACK_MULTIPLIER_ONE;
+    BYTE keys[SPEEDHACK_MAX_KEYS];
+    unsigned int key_count = 0, i;
+    BOOL toggle = FALSE, active = FALSE, was_pressed = FALSE, pressed;
+    const char *env;
+    char *end;
+
+    if ((env = getenv( "PROTON_SPEEDHACK_MULTIPLIER" ))) multiplier = strtoul( env, NULL, 10 );
+    if ((env = getenv( "PROTON_SPEEDHACK_TOGGLE" ))) toggle = env[0] == '1';
+    if ((env = getenv( "PROTON_SPEEDHACK_KEYS" )))
+    {
+        while (*env && key_count < SPEEDHACK_MAX_KEYS)
+        {
+            unsigned long vk = strtoul( env, &end, 0 );
+            if (end == env) break;
+            if (vk > 0 && vk < 0xff) keys[key_count++] = vk;
+            env = end;
+            while (*env == ',' || *env == ' ') ++env;
+        }
+    }
+
+    /* the wineserver may be reused from a previous session, start from a known state */
+    if (!speedhack_set_multiplier( SPEEDHACK_MULTIPLIER_ONE )) return 0;
+
+    if (!key_count || multiplier == SPEEDHACK_MULTIPLIER_ONE)
+    {
+        WINE_TRACE( "Speedhack disabled (keys %u, multiplier %lu).\n", key_count, multiplier );
+        return 0;
+    }
+
+    WINE_TRACE( "Speedhack multiplier %lu, %s mode, %u key(s).\n", multiplier,
+                toggle ? "toggle" : "hold", key_count );
+
+    for (;;)
+    {
+        BOOL want_active;
+
+        pressed = TRUE;
+        for (i = 0; i < key_count; ++i)
+            if (!(GetAsyncKeyState( keys[i] ) & 0x8000)) pressed = FALSE;
+
+        if (toggle) want_active = (pressed && !was_pressed) ? !active : active;
+        else want_active = pressed;
+        was_pressed = pressed;
+
+        if (want_active != active &&
+            speedhack_set_multiplier( want_active ? multiplier : SPEEDHACK_MULTIPLIER_ONE ))
+            active = want_active;
+
+        Sleep( 20 );
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     HANDLE wait_handle = INVALID_HANDLE_VALUE;
@@ -1001,8 +1099,12 @@ int main(int argc, char *argv[])
     }
 
     if (game_process)
+    {
         NtSetInformationProcess( GetCurrentProcess(), 1000 /* ProcessWineMakeProcessSystem */,
                                  &wait_handle, sizeof(HANDLE *) );
+        if (getenv( "PROTON_SPEEDHACK_KEYS" ))
+            CreateThread( NULL, 0, speedhack_thread, NULL, 0, NULL );
+    }
 
     if(wait_handle != INVALID_HANDLE_VALUE)
     {
@@ -1047,6 +1149,9 @@ int main(int argc, char *argv[])
         }
         CloseHandle(waits[1]);
     }
+
+    if (game_process && getenv( "PROTON_SPEEDHACK_KEYS" ))
+        speedhack_set_multiplier( SPEEDHACK_MULTIPLIER_ONE );
 
     if (event != INVALID_HANDLE_VALUE)
         CloseHandle(event);

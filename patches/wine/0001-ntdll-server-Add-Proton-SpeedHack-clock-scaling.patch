@@ -1,0 +1,329 @@
+From 95dbd47f1e3e8874b5b761e9ae03cb86ef46cce6 Mon Sep 17 00:00:00 2001
+From: Proton SpeedHack <speedhack@invalid>
+Date: Thu, 22 Oct 2026 11:06:28 +0000
+Subject: [PATCH] ntdll, server: Add Proton SpeedHack clock scaling.
+
+Accelerate the clocks seen by applications by a global, per-prefix
+multiplier, based on the idea of LtSquigs' Proton SpeedHack for
+Proton 8.0 (https://github.com/LtSquigs/wine, branch proton_8.0).
+
+The wineserver owns the speed state.  It re-anchors the accelerated
+clock on every change so that it stays continuous, and publishes the
+anchors under a sequence lock in the unused tail of the
+KUSER_SHARED_DATA page.  ntdll scales its own high resolution clock
+reads with them, so NtQueryPerformanceCounter keeps full resolution
+(Proton 8.0's version derived it from the 16 ms InterruptTime).
+
+Accelerated:  NtQueryPerformanceCounter (QueryPerformanceCounter,
+              timeGetTime), InterruptTime and TickCount in
+              KUSER_SHARED_DATA (GetTickCount[64], QueryInterruptTime,
+              QueryUnbiasedInterruptTime) and server message times.
+Unchanged:    system (wall clock) time, wait timeouts, sleeps and
+              server timers, which keep running on the real monotonic
+              clock.  ntdll uses the real clock wherever it exchanges
+              monotonic times with the wineserver.
+
+The speed is set with the Wine-private NtSetSystemInformation class
+SystemWineSpeedhackInformation (0x5348).  As long as the speed was
+never changed all clocks are bit-for-bit identical to upstream.
+---
+ dlls/ntdll/unix/server.c       |  5 +--
+ dlls/ntdll/unix/sync.c         | 59 ++++++++++++++++++++++++++++++++--
+ dlls/ntdll/unix/system.c       |  2 ++
+ dlls/ntdll/unix/unix_private.h | 10 ++++++
+ server/fd.c                    | 57 +++++++++++++++++++++++++++++---
+ server/protocol.def            | 44 +++++++++++++++++++++++++
+ server/request.h               |  3 +-
+ 7 files changed, 169 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 112157b..1410677 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -812,10 +812,7 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
+ 
+     if (abs_timeout < 0)
+     {
+-        LARGE_INTEGER now;
+-
+-        NtQueryPerformanceCounter( &now, NULL );
+-        abs_timeout -= now.QuadPart;
++        abs_timeout -= get_real_monotonic_counter();
+     }
+ 
+     ret = server_select( select_op, size, flags, abs_timeout, NULL, &apc );
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 67ab945..a952eee 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -109,6 +109,61 @@ static inline ULONGLONG monotonic_counter(void)
+     return ticks_from_time_t( now.tv_sec ) + now.tv_usec * 10 - server_start_time;
+ }
+ 
++/* return the unscaled monotonic counter, in the time domain used by the wineserver */
++ULONGLONG get_real_monotonic_counter(void)
++{
++    return monotonic_counter();
++}
++
++/* return the monotonic counter as seen by applications, accelerated by the Proton SpeedHack */
++static ULONGLONG speedhack_monotonic_counter(void)
++{
++    const volatile struct speedhack_shm *shm =
++        (const volatile struct speedhack_shm *)((const char *)user_shared_data + SPEEDHACK_SHM_OFFSET);
++    timeout_t real, real_anchor, fake_anchor;
++    unsigned int multiplier;
++    int seq;
++
++    for (;;)
++    {
++        seq = __atomic_load_n( &shm->seq, __ATOMIC_SEQ_CST );
++        if (!seq) return monotonic_counter();  /* never changed, identical to the real clock */
++        if (seq & 1)
++        {
++            YieldProcessor();
++            continue;
++        }
++        multiplier  = shm->multiplier;
++        real_anchor = shm->real_anchor;
++        fake_anchor = shm->fake_anchor;
++        real = monotonic_counter();
++        if (__atomic_load_n( &shm->seq, __ATOMIC_SEQ_CST ) == seq) break;
++    }
++    return speedhack_scale_time( real, multiplier, real_anchor, fake_anchor );
++}
++
++/******************************************************************
++ *           set_speedhack_multiplier
++ *
++ * Backend of the Wine-private SystemWineSpeedhackInformation class.
++ */
++NTSTATUS set_speedhack_multiplier( void *info, ULONG length )
++{
++    struct speedhack_info *params = info;
++    NTSTATUS status;
++
++    if (length != sizeof(*params)) return STATUS_INFO_LENGTH_MISMATCH;
++    if (!params) return STATUS_ACCESS_VIOLATION;
++
++    SERVER_START_REQ( set_speedhack_multiplier )
++    {
++        req->multiplier = params->multiplier;
++        if (!(status = wine_server_call( req ))) params->prev_multiplier = reply->prev_multiplier;
++    }
++    SERVER_END_REQ;
++    return status;
++}
++
+ #ifdef __linux__
+ 
+ #define USE_FUTEX
+@@ -2311,7 +2366,7 @@ NTSTATUS WINAPI NtQueryTimer( HANDLE handle, TIMER_INFORMATION_CLASS class,
+         if (basic_info->RemainingTime.QuadPart > 0) NtQuerySystemTime( &now );
+         else
+         {
+-            NtQueryPerformanceCounter( &now, NULL );
++            now.QuadPart = monotonic_counter();
+             basic_info->RemainingTime.QuadPart = -basic_info->RemainingTime.QuadPart;
+         }
+ 
+@@ -2508,7 +2563,7 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
+  */
+ NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER *frequency )
+ {
+-    counter->QuadPart = monotonic_counter();
++    counter->QuadPart = speedhack_monotonic_counter();
+     if (frequency) frequency->QuadPart = TICKSPERSEC;
+     return STATUS_SUCCESS;
+ }
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 1821c6e..2312e2d 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -4450,6 +4450,8 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
+  */
+ NTSTATUS WINAPI NtSetSystemInformation( SYSTEM_INFORMATION_CLASS class, void *info, ULONG length )
+ {
++    if (class == SystemWineSpeedhackInformation) return set_speedhack_multiplier( info, length );
++
+     FIXME( "(0x%08x,%p,0x%08x) stub\n", class, info, length );
+     return STATUS_SUCCESS;
+ }
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 2f649ca..65c336c 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -247,6 +247,16 @@ extern unsigned int server_wait( const union select_op *select_op, data_size_t s
+                                  const LARGE_INTEGER *timeout );
+ extern int get_inproc_alert_fd(void);
+ extern unsigned int server_wait_for_object( HANDLE handle, BOOL alertable, const LARGE_INTEGER *timeout );
++extern ULONGLONG get_real_monotonic_counter(void);
++
++/* Proton SpeedHack: Wine-private NtSetSystemInformation class, also used by Proton's steam.exe */
++#define SystemWineSpeedhackInformation 0x5348
++struct speedhack_info
++{
++    ULONG multiplier;       /* [in] speed in 1/1000 units (1000 = 1x), 0 to only query */
++    ULONG prev_multiplier;  /* [out] previous speed in 1/1000 units */
++};
++extern NTSTATUS set_speedhack_multiplier( void *info, ULONG length );
+ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_call *call,
+                                               union apc_result *result );
+ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+diff --git a/server/fd.c b/server/fd.c
+index aa71e6d..a0ccc56 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -377,9 +377,20 @@ static void atomic_store_long(volatile LONG *ptr, LONG value)
+ #endif
+ }
+ 
++/* Proton SpeedHack state, mirrored to the KUSER_SHARED_DATA page for clients */
++static unsigned int speedhack_multiplier = SPEEDHACK_MULTIPLIER_ONE;
++static timeout_t speedhack_real_anchor, speedhack_fake_anchor;
++
++/* convert a real monotonic time to the accelerated monotonic time seen by applications */
++timeout_t speedhack_time( timeout_t real )
++{
++    return speedhack_scale_time( real, speedhack_multiplier, speedhack_real_anchor, speedhack_fake_anchor );
++}
++
+ static void set_user_shared_data_time(void)
+ {
+-    timeout_t tick_count = monotonic_time / 10000;
++    timeout_t interrupt_time = speedhack_time( monotonic_time );
++    timeout_t tick_count = interrupt_time / 10000;
+     static timeout_t last_timezone_update, last_timezone_bias = 65535, adjusted_timezone_bias;
+     static int current_year = -1;
+     timeout_t timezone_bias;
+@@ -418,9 +429,9 @@ static void set_user_shared_data_time(void)
+     atomic_store_ulong(&user_shared_data->SystemTime.LowPart, current_time);
+     atomic_store_long(&user_shared_data->SystemTime.High1Time, current_time >> 32);
+ 
+-    atomic_store_long(&user_shared_data->InterruptTime.High2Time, monotonic_time >> 32);
+-    atomic_store_ulong(&user_shared_data->InterruptTime.LowPart, monotonic_time);
+-    atomic_store_long(&user_shared_data->InterruptTime.High1Time, monotonic_time >> 32);
++    atomic_store_long(&user_shared_data->InterruptTime.High2Time, interrupt_time >> 32);
++    atomic_store_ulong(&user_shared_data->InterruptTime.LowPart, interrupt_time);
++    atomic_store_long(&user_shared_data->InterruptTime.High1Time, interrupt_time >> 32);
+ 
+     atomic_store_long(&user_shared_data->TickCount.High2Time, tick_count >> 32);
+     atomic_store_ulong(&user_shared_data->TickCount.LowPart, tick_count);
+@@ -3333,3 +3344,41 @@ DECL_HANDLER(set_fd_eof_info)
+         release_object( fd );
+     }
+ }
++
++/* set the Proton SpeedHack multiplier, re-anchoring the accelerated clock to keep it continuous */
++DECL_HANDLER(set_speedhack_multiplier)
++{
++    volatile struct speedhack_shm *shm;
++    timeout_t now;
++
++    reply->prev_multiplier = speedhack_multiplier;
++    if (!req->multiplier || req->multiplier == speedhack_multiplier) return;
++    if (req->multiplier < SPEEDHACK_MULTIPLIER_MIN || req->multiplier > SPEEDHACK_MULTIPLIER_MAX)
++    {
++        set_error( STATUS_INVALID_PARAMETER );
++        return;
++    }
++    if (!user_shared_data)
++    {
++        set_error( STATUS_NOT_SUPPORTED );
++        return;
++    }
++
++    shm = (volatile struct speedhack_shm *)((char *)user_shared_data + SPEEDHACK_SHM_OFFSET);
++
++    /* make the sequence odd before sampling the clock, so that clients reading the
++     * old parameters can never observe a time past the new anchor */
++    __atomic_store_n( &shm->seq, shm->seq + 1, __ATOMIC_SEQ_CST );
++
++    now = monotonic_counter();
++    speedhack_fake_anchor = speedhack_time( now );
++    speedhack_real_anchor = now;
++    speedhack_multiplier  = req->multiplier;
++
++    shm->multiplier  = speedhack_multiplier;
++    shm->real_anchor = speedhack_real_anchor;
++    shm->fake_anchor = speedhack_fake_anchor;
++    __atomic_store_n( &shm->seq, shm->seq + 1, __ATOMIC_SEQ_CST );
++
++    set_current_time();
++}
+diff --git a/server/protocol.def b/server/protocol.def
+index ac38076..78374c9 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -4353,3 +4353,47 @@ enum fsync_type
+     unsigned int shm_idx;
+ @REPLY
+ @END
++
++/* Proton SpeedHack definitions
++ *
++ * The wineserver owns the speed state and publishes it, protected by a
++ * sequence lock, in the otherwise unused tail of the KUSER_SHARED_DATA page
++ * so that every process can scale its own high resolution clock reads.
++ *
++ *   accelerated = fake_anchor + (real - real_anchor) * multiplier / 1000
++ *
++ * 'real' is the unscaled monotonic counter (CLOCK_MONOTONIC_RAW, 100ns ticks)
++ * used by both ntdll and the wineserver.  Re-anchoring on every change keeps
++ * the accelerated clock continuous.  A zero sequence means "never changed",
++ * in which case the accelerated clock is identical to the real one.
++ */
++#define SPEEDHACK_SHM_OFFSET     0xf00
++#define SPEEDHACK_MULTIPLIER_ONE 1000
++#define SPEEDHACK_MULTIPLIER_MIN 10
++#define SPEEDHACK_MULTIPLIER_MAX 100000
++
++struct speedhack_shm
++{
++    int          seq;          /* sequence lock, odd while being updated */
++    unsigned int multiplier;   /* speed multiplier in 1/1000 units */
++    timeout_t    real_anchor;  /* real monotonic time of the last change */
++    timeout_t    fake_anchor;  /* accelerated monotonic time of the last change */
++};
++
++static inline timeout_t speedhack_scale_time( timeout_t real, unsigned int multiplier,
++                                              timeout_t real_anchor, timeout_t fake_anchor )
++{
++    timeout_t delta = real - real_anchor;
++
++    if (delta <= 0) return fake_anchor;
++    /* split the multiplication to avoid overflowing for long running sessions */
++    return fake_anchor + (delta / SPEEDHACK_MULTIPLIER_ONE) * multiplier
++                       + (delta % SPEEDHACK_MULTIPLIER_ONE) * multiplier / SPEEDHACK_MULTIPLIER_ONE;
++}
++
++/* Set the global speed multiplier; 0 only queries the current value */
++@REQ(set_speedhack_multiplier)
++    unsigned int multiplier;      /* new multiplier in 1/1000 units, or 0 */
++@REPLY
++    unsigned int prev_multiplier; /* previous multiplier in 1/1000 units */
++@END
+diff --git a/server/request.h b/server/request.h
+index 13254d9..8f31164 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -55,6 +55,7 @@ extern int send_client_fd( struct process *process, int fd, obj_handle_t handle
+ extern void read_request( struct thread *thread );
+ extern void write_reply( struct thread *thread );
+ extern timeout_t monotonic_counter(void);
++extern timeout_t speedhack_time( timeout_t real );
+ extern void open_master_socket(void);
+ extern void close_master_socket( timeout_t timeout );
+ extern void shutdown_master_socket(void);
+@@ -69,7 +70,7 @@ extern void trace_reply( enum request req, const union generic_reply *reply );
+ /* get current tick count to return to client */
+ static inline unsigned int get_tick_count(void)
+ {
+-    return monotonic_counter() / 10000;
++    return speedhack_time( monotonic_counter() ) / 10000;
+ }
+ 
+ /* get the request vararg data */
+-- 
+2.55.0
+
