@@ -1,3 +1,15 @@
+Proton SpeedHack 11
+-------------------
+
+This repository is Valve Proton 11.0-2e with a port of
+[LtSquigs' Proton SpeedHack](https://github.com/LtSquigs/Proton-SpeedHack):
+hold or toggle a hotkey (or a Steam Input binding) to run games faster or
+slower.  See **[SPEEDHACK.md](SPEEDHACK.md)** for installation, configuration,
+design, build workflow and verification status.  The Wine changes live in
+`patches/wine/` and must be applied with `patches/apply-wine-patches.sh`
+before building.  The rest of this README is Valve's.
+
+
 Introduction
 ------------
 
