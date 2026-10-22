@@ -262,7 +262,7 @@ Verification status
 | `make_requests` regenerates the protocol with the new request | verified locally |
 | Configuration resolution (`proton_speedhack.py`) | unit tested |
 | Test program compiles (x86_64, i686) | verified with mingw-w64 |
-| Patched Wine ntdll/wineserver build + `speedhack_test` run | see the pull request description |
+| Patched Wine 11 (standalone headless build, not the Proton container) + `speedhack_test.exe` / `speedhack_test32.exe` | **passed** (1×, 2×, 3×, toggling, 0.5×, back to 1×, invalid values, monotonicity) |
 | `steam.exe` hotkey thread at runtime, Steam Input | **not verified** |
 | Full `make redist` build in the Proton SDK container | **not run yet** |
 | Games under the compiled distribution | **not verified** |
