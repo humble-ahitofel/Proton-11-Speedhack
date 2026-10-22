@@ -1,0 +1,66 @@
+name: SpeedHack checks
+
+# Lightweight source-level checks (a few minutes, standard runner).
+# These do NOT build Proton; use the "Build Proton SpeedHack" workflow for that.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'patches/**'
+      - 'proton'
+      - 'proton_speedhack.py'
+      - 'speedhack.json'
+      - 'speedhack_test/**'
+      - 'steam_helper/**'
+      - '.gitmodules'
+      - '.github/workflows/speedhack-checks.yml'
+  push:
+    paths:
+      - 'patches/**'
+      - 'proton_speedhack.py'
+      - 'speedhack_test/**'
+      - 'steam_helper/**'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned wine submodule
+        run: git submodule update --init --depth 1 wine
+
+      - name: Wine patches apply to the pinned wine commit
+        run: |
+          patches/apply-wine-patches.sh --check
+          patches/apply-wine-patches.sh
+          patches/apply-wine-patches.sh --check
+
+      - name: Regenerate wine server protocol files
+        run: |
+          cd wine
+          tools/make_requests
+          git diff --stat
+
+      - name: Configuration unit tests
+        run: python3 speedhack_test/test_proton_speedhack.py -v
+
+      - name: Proton script syntax
+        run: python3 -m py_compile proton proton_speedhack.py
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+
+      - name: Build the SpeedHack test program
+        run: make -C speedhack_test CFLAGS="-O2 -Wall -Wno-unused-parameter -Werror"
+
+      - name: Upload the SpeedHack test program
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedhack_test
+          path: speedhack_test/*.exe

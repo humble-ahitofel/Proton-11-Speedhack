@@ -1,0 +1,229 @@
+name: Build Proton SpeedHack
+
+# Full Proton build using Valve's containerized build system (Proton SDK
+# container image, see configure.sh / Makefile.in).
+#
+# Manually triggered only: a full build is expensive (several hours on a
+# 4-core runner and roughly 50-60 GB of disk).  Use the `runner` input to pick
+# a larger GitHub-hosted runner or a self-hosted runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label, or a JSON array of labels (e.g. ["self-hosted","linux","x64"])'
+        type: string
+        default: ubuntu-latest
+      build_name:
+        description: Name of the Steam compatibility tool and artifact
+        type: string
+        default: proton-11.0-2e-speedhack
+      jobs:
+        description: Parallel make jobs (0 = number of CPUs)
+        type: string
+        default: '0'
+      min_cpus:
+        description: Minimum number of CPUs
+        type: string
+        default: '4'
+      min_ram_gb:
+        description: Minimum RAM in GiB
+        type: string
+        default: '15'
+      min_disk_gb:
+        description: Minimum free disk space in GiB (workspace filesystem)
+        type: string
+        default: '55'
+      free_disk_space:
+        description: Remove preinstalled toolchains on GitHub-hosted runners first
+        type: boolean
+        default: true
+      enable_ccache:
+        description: Use ccache, persisted with actions/cache
+        type: boolean
+        default: true
+      timeout_minutes:
+        description: Job timeout in minutes (GitHub-hosted runners are limited to 360)
+        type: string
+        default: '360'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-proton-speedhack-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    env:
+      BUILD_NAME: ${{ inputs.build_name }}
+      LOG_DIR: ${{ github.workspace }}/logs
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+      CCACHE_COMPRESS: '1'
+      CARGO_HOME: ${{ github.workspace }}/.cargo
+    steps:
+      - name: Free disk space
+        if: inputs.free_disk_space && runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+                      /usr/local/share/powershell /usr/local/share/chromium || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Check build resources
+        env:
+          MIN_CPUS: ${{ inputs.min_cpus }}
+          MIN_RAM_GB: ${{ inputs.min_ram_gb }}
+          MIN_DISK_GB: ${{ inputs.min_disk_gb }}
+        run: |
+          mkdir -p "$LOG_DIR"
+          cpus=$(nproc)
+          # MemTotal is slightly below the nominal size; round to nearest GiB
+          ram_gb=$(( ($(awk '/^MemTotal:/ {print $2}' /proc/meminfo) + 524288) / 1048576 ))
+          disk_gb=$(( $(df --output=avail -k "$GITHUB_WORKSPACE" | tail -1) / 1048576 ))
+          {
+            echo "runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT)"
+            echo "cpus: $cpus (minimum $MIN_CPUS)"
+            echo "ram: ${ram_gb} GiB (minimum $MIN_RAM_GB)"
+            echo "free disk: ${disk_gb} GiB (minimum $MIN_DISK_GB)"
+            uname -a
+            docker --version || true
+          } | tee "$LOG_DIR/resources.txt"
+          ok=1
+          [ "$cpus" -ge "$MIN_CPUS" ] || { echo "::error::Not enough CPUs: $cpus < $MIN_CPUS"; ok=0; }
+          [ "$ram_gb" -ge "$MIN_RAM_GB" ] || { echo "::error::Not enough RAM: ${ram_gb} GiB < $MIN_RAM_GB GiB"; ok=0; }
+          [ "$disk_gb" -ge "$MIN_DISK_GB" ] || { echo "::error::Not enough disk: ${disk_gb} GiB < $MIN_DISK_GB GiB"; ok=0; }
+          command -v docker >/dev/null || { echo "::error::docker is required"; ok=0; }
+          [ "$ok" = 1 ]
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Apply SpeedHack Wine patches
+        run: |
+          set -o pipefail
+          patches/apply-wine-patches.sh 2>&1 | tee "$LOG_DIR/apply-wine-patches.log"
+          git -C wine diff --stat | tee -a "$LOG_DIR/apply-wine-patches.log"
+
+      - name: Ensure a tag for the dist version file
+        run: |
+          git describe --tags >/dev/null 2>&1 || git tag "speedhack-$(git rev-parse --short HEAD)"
+          git describe --tags
+
+      - name: Restore ccache
+        if: inputs.enable_ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Restore cargo registry
+        id: cargo
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.cargo/registry
+            ${{ github.workspace }}/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('gst-plugins-rs/**/Cargo.lock', 'gst-plugins-rs/**/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Configure
+        env:
+          CCACHE_ARG: ${{ inputs.enable_ccache && '--enable-ccache' || '' }}
+        run: |
+          set -o pipefail
+          mkdir -p build "$CCACHE_DIR" "$CARGO_HOME"
+          cd build
+          ../configure.sh --build-name="$BUILD_NAME" --container-engine=docker $CCACHE_ARG \
+            2>&1 | tee "$LOG_DIR/configure.log"
+
+      - name: Build (make redist)
+        working-directory: build
+        env:
+          JOBS: ${{ inputs.jobs }}
+        run: |
+          set -o pipefail
+          [ "$JOBS" -gt 0 ] 2>/dev/null || JOBS=$(nproc)
+          echo "Building with -j$JOBS"
+          make -j"$JOBS" redist 2>&1 | tee "$LOG_DIR/build.log"
+
+      - name: Save ccache
+        if: always() && inputs.enable_ccache && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save cargo registry
+        if: always() && steps.cargo.outputs.cache-hit != 'true' && steps.cargo.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.cargo/registry
+            ${{ github.workspace }}/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('gst-plugins-rs/**/Cargo.lock', 'gst-plugins-rs/**/Cargo.toml') }}
+
+      - name: Verify the distribution
+        run: |
+          r=build/redist
+          for f in proton proton_speedhack.py speedhack.json compatibilitytool.vdf toolmanifest.vdf version \
+                   files/bin/wine files/bin/wineserver; do
+            test -e "$r/$f" || { echo "::error::missing $f in redist"; exit 1; }
+          done
+          steam=$(find "$r/files/lib" -path '*x86_64-windows/steam.exe' | head -1)
+          test -n "$steam" || { echo "::error::steam.exe not found"; exit 1; }
+          grep -a -q "PROTON_SPEEDHACK_KEYS" "$steam" \
+            || { echo "::error::steam.exe was built without the SpeedHack"; exit 1; }
+          grep -a -q "set_speedhack_multiplier" "$r/files/bin/wineserver" \
+            || echo "::warning::wineserver does not contain the set_speedhack_multiplier request name"
+          cat "$r/version" "$r/compatibilitytool.vdf"
+          du -sh "$r"
+
+      - name: Package
+        run: |
+          mv build/redist "build/$BUILD_NAME"
+          XZ_OPT="-T0 -6" tar -C build -cJf "$BUILD_NAME.tar.xz" "$BUILD_NAME"
+          sha256sum "$BUILD_NAME.tar.xz" | tee "$BUILD_NAME.tar.xz.sha256"
+          ls -la "$BUILD_NAME.tar.xz"
+
+      - name: Upload Proton SpeedHack
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_name }}
+          path: |
+            ${{ inputs.build_name }}.tar.xz
+            ${{ inputs.build_name }}.tar.xz.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Collect build logs
+        if: always()
+        run: |
+          mkdir -p "$LOG_DIR/configure-logs"
+          if [ -d build ]; then
+            find build -maxdepth 5 \( -name config.log -o -name meson-log.txt -o -name CMakeError.log \) \
+                 -path '*obj-*' 2>/dev/null | while read -r f; do
+              cp "$f" "$LOG_DIR/configure-logs/$(echo "${f#build/}" | tr / _)"
+            done
+          fi
+          df -h "$GITHUB_WORKSPACE" > "$LOG_DIR/disk-after.txt" || true
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_name }}-logs
+          path: logs
+          retention-days: 30
+          if-no-files-found: warn
