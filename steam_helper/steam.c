@@ -955,6 +955,8 @@ static BOOL speedhack_set_multiplier( ULONG multiplier )
     return TRUE;
 }
 
+static volatile LONG speedhack_stop;
+
 static DWORD WINAPI speedhack_thread( void *arg )
 {
     ULONG multiplier = SPEEDHACK_MULTIPLIER_ONE;
@@ -978,9 +980,6 @@ static DWORD WINAPI speedhack_thread( void *arg )
         }
     }
 
-    /* the wineserver may be reused from a previous session, start from a known state */
-    if (!speedhack_set_multiplier( SPEEDHACK_MULTIPLIER_ONE )) return 0;
-
     if (!key_count || multiplier == SPEEDHACK_MULTIPLIER_ONE)
     {
         WINE_TRACE( "Speedhack disabled (keys %u, multiplier %lu).\n", key_count, multiplier );
@@ -990,7 +989,7 @@ static DWORD WINAPI speedhack_thread( void *arg )
     WINE_TRACE( "Speedhack multiplier %lu, %s mode, %u key(s).\n", multiplier,
                 toggle ? "toggle" : "hold", key_count );
 
-    for (;;)
+    while (!speedhack_stop)
     {
         BOOL want_active;
 
@@ -1018,6 +1017,8 @@ int main(int argc, char *argv[])
     HANDLE event = INVALID_HANDLE_VALUE;
     HANDLE child = INVALID_HANDLE_VALUE;
     BOOL game_process = FALSE;
+    HANDLE speedhack_handle = NULL;
+    BOOL speedhack = FALSE;
     const char *sgi;
     DWORD rc = 0;
 
@@ -1077,6 +1078,10 @@ int main(int argc, char *argv[])
         game_process = TRUE;
     }
 
+    /* the wineserver may be reused from a previous session, start from a known state */
+    if (game_process && getenv( "PROTON_SPEEDHACK_KEYS" ))
+        speedhack = speedhack_set_multiplier( SPEEDHACK_MULTIPLIER_ONE );
+
     if (argc > 1)
     {
         BOOL should_await;
@@ -1102,8 +1107,8 @@ int main(int argc, char *argv[])
     {
         NtSetInformationProcess( GetCurrentProcess(), 1000 /* ProcessWineMakeProcessSystem */,
                                  &wait_handle, sizeof(HANDLE *) );
-        if (getenv( "PROTON_SPEEDHACK_KEYS" ))
-            CreateThread( NULL, 0, speedhack_thread, NULL, 0, NULL );
+        if (speedhack && !(speedhack_handle = CreateThread( NULL, 0, speedhack_thread, NULL, 0, NULL )))
+            WINE_ERR( "Failed to create speedhack thread, err %lu.\n", GetLastError() );
     }
 
     if(wait_handle != INVALID_HANDLE_VALUE)
@@ -1150,7 +1155,13 @@ int main(int argc, char *argv[])
         CloseHandle(waits[1]);
     }
 
-    if (game_process && getenv( "PROTON_SPEEDHACK_KEYS" ))
+    if (speedhack_handle)
+    {
+        InterlockedExchange( &speedhack_stop, 1 );
+        WaitForSingleObject( speedhack_handle, 1000 );
+        CloseHandle( speedhack_handle );
+    }
+    if (speedhack)
         speedhack_set_multiplier( SPEEDHACK_MULTIPLIER_ONE );
 
     if (event != INVALID_HANDLE_VALUE)

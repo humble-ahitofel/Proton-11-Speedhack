@@ -130,9 +130,10 @@ ntdll converts relative timeouts with the *real* monotonic clock
 schedules them on real time.
 
 **steam.exe.**  When `PROTON_SPEEDHACK_KEYS` is set, the game's `steam.exe`
-wrapper starts a thread that resets the speed to 1×, polls the configured keys
-every 20 ms and switches between 1× and the configured multiplier.  The speed
-is reset to 1× when the game exits.
+wrapper resets the speed to 1× before launching the game (the wineserver may
+be reused), then starts a thread that polls the configured keys every 20 ms and
+switches between 1× and the configured multiplier.  When the game exits the
+thread is stopped and the speed is reset to 1×.
 
 **proton.**  `proton_speedhack.py` resolves the configuration and passes
 `PROTON_SPEEDHACK_MULTIPLIER`, `PROTON_SPEEDHACK_TOGGLE` and
@@ -146,6 +147,10 @@ is reset to 1× when the game exits.
 * X11 event timestamps are converted with the real rate; Vulkan/DXVK
   calibrated timestamps are not scaled.  Games using either for timing may
   behave oddly while accelerated.
+* Audio: winepulse (Proton's default) only uses QPC for timestamps reported to
+  the game.  The ALSA/OSS drivers schedule their period loop with QPC but sleep
+  in real time, so with the ALSA fallback they wake up more often while
+  accelerated.
 * Games reading the TSC directly (`RDTSC`) are not affected.
 * The `KUSER_SHARED_DATA` tail offset and info class `0x5348` are a private
   convention between this patch, `steam.exe` and the test program.
@@ -253,7 +258,7 @@ Verification status
 
 | Item | Status |
 |------|--------|
-| Patch applies to Valve wine `e60892cc` (Proton 11.0-2e) | verified (locally and in CI checks) |
+| Patch applies to Valve wine `e60892cc` (Proton 11.0-2e) | verified locally (also checked by `speedhack-checks.yml`) |
 | `make_requests` regenerates the protocol with the new request | verified locally |
 | Configuration resolution (`proton_speedhack.py`) | unit tested |
 | Test program compiles (x86_64, i686) | verified with mingw-w64 |

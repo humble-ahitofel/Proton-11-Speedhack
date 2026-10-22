@@ -60,12 +60,17 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     env:
       BUILD_NAME: ${{ inputs.build_name }}
-      LOG_DIR: ${{ github.workspace }}/logs
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
       CCACHE_COMPRESS: '1'
       CARGO_HOME: ${{ github.workspace }}/.cargo
     steps:
+      - name: Prepare log directory
+        # outside the workspace, actions/checkout cleans the workspace
+        run: |
+          echo "LOG_DIR=$RUNNER_TEMP/speedhack-logs" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/speedhack-logs"
+
       - name: Free disk space
         if: inputs.free_disk_space && runner.environment == 'github-hosted'
         run: |
@@ -82,7 +87,6 @@ jobs:
           MIN_RAM_GB: ${{ inputs.min_ram_gb }}
           MIN_DISK_GB: ${{ inputs.min_disk_gb }}
         run: |
-          mkdir -p "$LOG_DIR"
           cpus=$(nproc)
           # MemTotal is slightly below the nominal size; round to nearest GiB
           ram_gb=$(( ($(awk '/^MemTotal:/ {print $2}' /proc/meminfo) + 524288) / 1048576 ))
@@ -224,6 +228,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.build_name }}-logs
-          path: logs
+          path: ${{ runner.temp }}/speedhack-logs
           retention-days: 30
           if-no-files-found: warn
