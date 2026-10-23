@@ -283,7 +283,7 @@ Verification status
 | Configuration resolution (`proton_speedhack.py`) | unit tested |
 | Test program compiles (x86_64, i686) | verified with mingw-w64 |
 | Patched Wine 11 (standalone headless build, not the Proton container) + `speedhack_test.exe` / `speedhack_test32.exe` | **passed** (1×, 2×, 3×, toggling, 0.5×, back to 1×, invalid values, monotonicity) |
-| Full `make redist` build in the Proton SDK container | **passed** on a self-hosted 8-core runner (commit `2ff3bf49`, 1 h 34 min) |
+| Full `make redist` build in the Proton SDK container | **passed** on a self-hosted 8-core runner (release tag `speedhack-2ff3bf49`, 1 h 34 min) |
 | `steam.exe` hotkey thread at runtime | **hold mode works**: default Page Up / 2.5× in one game on a SteamOS machine; toggle mode and speeds below 1× **not tried in a game** |
 | Steam Input bindings as hotkey | **not verified** |
 | Games under the compiled distribution | **one game, a few minutes**, default configuration; no longer sessions, no other engines |
