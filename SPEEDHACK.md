@@ -6,26 +6,44 @@ A port of [LtSquigs' Proton SpeedHack](https://github.com/LtSquigs/Proton-SpeedH
 is toggled) the game's clocks run faster or slower, which speeds up or slows
 down most games, similar to Cheat Engine's speedhack.
 
-> **Status: implemented, not yet release-verified.**  The Wine patch, the
-> `steam.exe` hotkey thread, the configuration and the build workflow are in
-> place.  See [Verification status](#verification-status) for what has and has
-> not been tested.  Do not treat a build as a working release until the
-> runtime tests below have passed on the compiled distribution.
+> **Status: built and lightly tested.**  The full Proton build passed and,
+> on a SteamOS machine, the default configuration (hold Page Up for 2.5×)
+> worked in a game for a few minutes.  Toggle mode, speeds below 1×, Steam
+> Input bindings and long sessions have not been tried in a game.  See
+> [Verification status](#verification-status) before relying on anything.
+> This is a personal project with no support; do not use it in online or
+> anti-cheat protected games.
 
 Installing
 ----------
 
-1. Run the **Build Proton SpeedHack** workflow (Actions tab, see
-   [Building](#building)) or build locally.
-2. Download the `proton-11.0-2e-speedhack` artifact, unzip it, and extract the
-   tarball into `~/.steam/root/compatibilitytools.d/`
-   (Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`):
+On the machine that runs Steam (desktop mode on a Steam Deck):
 
-   ```bash
-   mkdir -p ~/.steam/root/compatibilitytools.d
-   tar -xJf proton-11.0-2e-speedhack.tar.xz -C ~/.steam/root/compatibilitytools.d/
-   ```
-3. Restart Steam and select the tool under *Properties → Compatibility* of a game.
+```bash
+curl -fsSL https://raw.githubusercontent.com/humble-ahitofel/Proton-11-Speedhack/proton_11.0/install-speedhack.sh | sh
+```
+
+`install-speedhack.sh` downloads the newest
+[release](https://github.com/humble-ahitofel/Proton-11-Speedhack/releases)
+tarball (pre-releases included), verifies its `.sha256`, finds Steam's
+`compatibilitytools.d` (native, `~/.local/share/Steam` or Flatpak), unpacks
+into a temporary directory first so that a failed extraction leaves nothing
+behind, and asks before replacing an existing installation of the same name
+(`-y` skips the question, `--dest DIR` overrides the directory).  It needs
+`curl`, `tar`, `xz`, `sha256sum` and about 2.5 GB of free space.
+
+Without a network, or with a build of your own: put the tarball (and its
+`.sha256`, if you have it) next to the script and run `sh install-speedhack.sh`,
+or pass the tarball's path.  The tarball comes from the **Build Proton
+SpeedHack** workflow (Actions tab, see [Building](#building)) or a local
+build; by hand it is just
+
+```bash
+mkdir -p ~/.steam/root/compatibilitytools.d
+tar -xJf proton-11.0-2e-speedhack.tar.xz -C ~/.steam/root/compatibilitytools.d/
+```
+
+Then restart Steam and select the tool under *Properties → Compatibility* of a game.
 
 Usage and configuration
 -----------------------
@@ -132,8 +150,10 @@ schedules them on real time.
 **steam.exe.**  When `PROTON_SPEEDHACK_KEYS` is set, the game's `steam.exe`
 wrapper resets the speed to 1× before launching the game (the wineserver may
 be reused), then starts a thread that polls the configured keys every 20 ms and
-switches between 1× and the configured multiplier.  When the game exits the
-thread is stopped and the speed is reset to 1×.
+switches between 1× and the configured multiplier.  If the wineserver rejects
+a request the thread gives up instead of retrying on every poll.  When the game
+exits the thread is stopped (terminated, if it does not stop within a second)
+and the speed is reset to 1×.
 
 **proton.**  `proton_speedhack.py` resolves the configuration and passes
 `PROTON_SPEEDHACK_MULTIPLIER`, `PROTON_SPEEDHACK_TOGGLE` and
@@ -263,6 +283,8 @@ Verification status
 | Configuration resolution (`proton_speedhack.py`) | unit tested |
 | Test program compiles (x86_64, i686) | verified with mingw-w64 |
 | Patched Wine 11 (standalone headless build, not the Proton container) + `speedhack_test.exe` / `speedhack_test32.exe` | **passed** (1×, 2×, 3×, toggling, 0.5×, back to 1×, invalid values, monotonicity) |
-| `steam.exe` hotkey thread at runtime, Steam Input | **not verified** |
-| Full `make redist` build in the Proton SDK container | **not run yet** |
-| Games under the compiled distribution | **not verified** |
+| Full `make redist` build in the Proton SDK container | **passed** on a self-hosted 8-core runner (commit `2ff3bf49`, 1 h 34 min) |
+| `steam.exe` hotkey thread at runtime | **hold mode works**: default Page Up / 2.5× in one game on a SteamOS machine; toggle mode and speeds below 1× **not tried in a game** |
+| Steam Input bindings as hotkey | **not verified** |
+| Games under the compiled distribution | **one game, a few minutes**, default configuration; no longer sessions, no other engines |
+| `install-speedhack.sh` | tested against the built tarball: fresh install, abort, replace and the release download (mock server) |

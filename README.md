@@ -1,13 +1,54 @@
 Proton SpeedHack 11
 -------------------
 
-This repository is Valve Proton 11.0-2e with a port of
-[LtSquigs' Proton SpeedHack](https://github.com/LtSquigs/Proton-SpeedHack):
-hold or toggle a hotkey (or a Steam Input binding) to run games faster or
-slower.  See **[SPEEDHACK.md](SPEEDHACK.md)** for installation, configuration,
-design, build workflow and verification status.  The Wine changes live in
-`patches/wine/` and must be applied with `patches/apply-wine-patches.sh`
-before building.  The rest of this README is Valve's.
+> **Personal project, use at your own risk.**  I made this for myself.
+> Issues and pull requests are closed, there is no support, and no promise
+> that it works for you or keeps working.  If you use it, you are on your own.
+>
+> **Do not use it in online or anti-cheat protected games.**  A speedhack is
+> exactly what anti-cheat looks for, and a ban is on you.
+
+Hold **Page Up** and the game runs at **2.5×**.  Let go and it is back to
+normal.  Works with any game that runs under Proton, Steam Deck included.
+
+### Install
+
+One command on the machine that runs Steam (desktop mode on a Steam Deck):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/humble-ahitofel/Proton-11-Speedhack/proton_11.0/install-speedhack.sh | sh
+```
+
+Restart Steam, then pick `proton-11.0-2e-speedhack` for a game under
+*Properties → Compatibility → Force the use of a specific Steam Play
+compatibility tool*.  The script downloads the newest
+[release](https://github.com/humble-ahitofel/Proton-11-Speedhack/releases),
+checks its sha256 and unpacks it into Steam's `compatibilitytools.d`.  To
+install from a tarball you already have (say, from a USB stick), put
+[`install-speedhack.sh`](install-speedhack.sh) next to it and run
+`sh install-speedhack.sh`.
+
+Speed, hold or toggle mode and the hotkey are configurable, and Steam Input
+bindings work as hotkeys: see
+[SPEEDHACK.md](SPEEDHACK.md#usage-and-configuration).
+
+### What this is
+
+Valve Proton 11.0-2e with a port of
+[LtSquigs' Proton SpeedHack](https://github.com/LtSquigs/Proton-SpeedHack)
+(Proton 8.0): hold or toggle a hotkey to run a game's clocks faster or
+slower, like Cheat Engine's speedhack.  **[SPEEDHACK.md](SPEEDHACK.md)** has
+the configuration, the design, the build workflow, and what has and has not
+been tested.  The Wine changes live in `patches/wine/` and must be applied
+with `patches/apply-wine-patches.sh` before building.
+
+### Made by Claude
+
+The whole port was done by Claude.
+
+![As long as it works](aslongasitworks.png)
+
+The rest of this README is Valve's.
 
 
 Introduction
