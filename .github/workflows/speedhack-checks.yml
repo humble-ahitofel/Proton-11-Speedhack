@@ -18,9 +18,13 @@ on:
   push:
     paths:
       - 'patches/**'
+      - 'proton'
       - 'proton_speedhack.py'
+      - 'speedhack.json'
       - 'speedhack_test/**'
       - 'steam_helper/**'
+      - '.gitmodules'
+      - '.github/workflows/speedhack-checks.yml'
 
 permissions:
   contents: read

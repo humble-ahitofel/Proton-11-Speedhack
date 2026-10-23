@@ -89,7 +89,8 @@ def parse_keys(value):
             codes.append(KEYCODES[name])
             continue
         try:
-            code = int(name, 0)
+            # plain decimal first: int(x, 0) rejects leading zeros such as "08"
+            code = int(name, 10) if name.isdigit() else int(name, 0)
         except ValueError:
             return None
         if not 0 < code < 0xFF:
@@ -117,7 +118,6 @@ def read_config_file(path, log):
     # The original Proton SpeedHack documented "keys" but read "key".
     if "keys" not in data and "key" in data:
         data["keys"] = data["key"]
-    log("SpeedHack: using config file " + path)
     return {k: data[k] for k in PARSERS if k in data}
 
 
@@ -149,6 +149,7 @@ def resolve_config(env, install_dir, log=lambda msg: None):
                 log("SpeedHack: ignoring invalid " + name + " " + repr(config[name]) + " from " + source)
                 continue
             result[name] = value
+            log("SpeedHack: using " + name + " from " + source)
             break
     return result
 

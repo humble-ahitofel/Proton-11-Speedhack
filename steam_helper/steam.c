@@ -1001,9 +1001,17 @@ static DWORD WINAPI speedhack_thread( void *arg )
         else want_active = pressed;
         was_pressed = pressed;
 
-        if (want_active != active &&
-            speedhack_set_multiplier( want_active ? multiplier : SPEEDHACK_MULTIPLIER_ONE ))
+        if (want_active != active)
+        {
+            if (!speedhack_set_multiplier( want_active ? multiplier : SPEEDHACK_MULTIPLIER_ONE ))
+            {
+                /* the wineserver rejected the request; it will not start working by itself,
+                 * don't retry (and log) on every poll */
+                WINE_ERR( "Speedhack disabled.\n" );
+                break;
+            }
             active = want_active;
+        }
 
         Sleep( 20 );
     }
@@ -1158,7 +1166,12 @@ int main(int argc, char *argv[])
     if (speedhack_handle)
     {
         InterlockedExchange( &speedhack_stop, 1 );
-        WaitForSingleObject( speedhack_handle, 1000 );
+        /* the thread must be gone before the speed is reset below so that it cannot set it again */
+        if (WaitForSingleObject( speedhack_handle, 1000 ) != WAIT_OBJECT_0)
+        {
+            WINE_ERR( "Speedhack thread did not stop, terminating it.\n" );
+            TerminateThread( speedhack_handle, 0 );
+        }
         CloseHandle( speedhack_handle );
     }
     if (speedhack)

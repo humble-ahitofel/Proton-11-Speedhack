@@ -54,6 +54,7 @@ class SpeedhackConfigTest(unittest.TestCase):
     def test_numeric_keys_and_disable(self):
         self.assertEqual(self.env({"SPEEDHACK_KEYS": "0x70"})["PROTON_SPEEDHACK_KEYS"], "0x70")
         self.assertEqual(self.env({"SPEEDHACK_KEYS": "112"})["PROTON_SPEEDHACK_KEYS"], "0x70")
+        self.assertEqual(self.env({"SPEEDHACK_KEYS": "08,010"})["PROTON_SPEEDHACK_KEYS"], "0x08,0x0a")
         self.assertEqual(self.env({"SPEEDHACK_KEYS": ""})["PROTON_SPEEDHACK_KEYS"], "")
 
     def test_invalid_values_fall_back(self):

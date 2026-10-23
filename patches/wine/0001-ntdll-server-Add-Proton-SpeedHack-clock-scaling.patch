@@ -28,13 +28,13 @@ SystemWineSpeedhackInformation (0x5348).  As long as the speed was
 never changed all clocks are bit-for-bit identical to upstream.
 ---
  dlls/ntdll/unix/server.c       |  5 +--
- dlls/ntdll/unix/sync.c         | 59 ++++++++++++++++++++++++++++++++--
+ dlls/ntdll/unix/sync.c         | 80 ++++++++++++++++++++++++++++++++++++++++--
  dlls/ntdll/unix/system.c       |  2 ++
  dlls/ntdll/unix/unix_private.h | 10 ++++++
- server/fd.c                    | 57 +++++++++++++++++++++++++++++---
- server/protocol.def            | 44 +++++++++++++++++++++++++
+ server/fd.c                    | 60 ++++++++++++++++++++++++++++---
+ server/protocol.def            | 44 +++++++++++++++++++++++
  server/request.h               |  3 +-
- 7 files changed, 169 insertions(+), 11 deletions(-)
+ 7 files changed, 193 insertions(+), 11 deletions(-)
 
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
 index 112157b..1410677 100644
@@ -56,7 +56,7 @@ diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
 index 67ab945..a952eee 100644
 --- a/dlls/ntdll/unix/sync.c
 +++ b/dlls/ntdll/unix/sync.c
-@@ -109,6 +109,61 @@ static inline ULONGLONG monotonic_counter(void)
+@@ -109,6 +109,82 @@ static inline ULONGLONG monotonic_counter(void)
      return ticks_from_time_t( now.tv_sec ) + now.tv_usec * 10 - server_start_time;
  }
  
@@ -66,13 +66,16 @@ index 67ab945..a952eee 100644
 +    return monotonic_counter();
 +}
 +
++/* how long to wait for the wineserver to finish publishing new speedhack parameters */
++#define SPEEDHACK_SPIN_TIMEOUT (2 * (timeout_t)TICKSPERSEC)
++
 +/* return the monotonic counter as seen by applications, accelerated by the Proton SpeedHack */
 +static ULONGLONG speedhack_monotonic_counter(void)
 +{
 +    const volatile struct speedhack_shm *shm =
 +        (const volatile struct speedhack_shm *)((const char *)user_shared_data + SPEEDHACK_SHM_OFFSET);
-+    timeout_t real, real_anchor, fake_anchor;
-+    unsigned int multiplier;
++    timeout_t real = 0, real_anchor = 0, fake_anchor = 0, spin_start = 0;
++    unsigned int multiplier = 0, spins = 0;
 +    int seq;
 +
 +    for (;;)
@@ -81,14 +84,32 @@ index 67ab945..a952eee 100644
 +        if (!seq) return monotonic_counter();  /* never changed, identical to the real clock */
 +        if (seq & 1)
 +        {
-+            YieldProcessor();
++            /* the writer is the wineserver, a different process which may be descheduled
++             * or gone: give up the CPU instead of burning it, and don't wait forever */
++            real = monotonic_counter();
++            if (!spin_start) spin_start = real;
++            if (real - spin_start > SPEEDHACK_SPIN_TIMEOUT) break;
++            if (++spins < 64) YieldProcessor();
++            else sched_yield();
 +            continue;
 +        }
 +        multiplier  = shm->multiplier;
 +        real_anchor = shm->real_anchor;
 +        fake_anchor = shm->fake_anchor;
 +        real = monotonic_counter();
-+        if (__atomic_load_n( &shm->seq, __ATOMIC_SEQ_CST ) == seq) break;
++        /* the parameters must be read before the sequence is checked again */
++        __atomic_thread_fence( __ATOMIC_ACQUIRE );
++        if (__atomic_load_n( &shm->seq, __ATOMIC_RELAXED ) == seq) break;
++    }
++    if (seq & 1)
++    {
++        /* gave up waiting: the wineserver died in the middle of an update and the prefix
++         * is going away, use whatever is there rather than hanging every clock reader */
++        multiplier  = shm->multiplier;
++        real_anchor = shm->real_anchor;
++        fake_anchor = shm->fake_anchor;
++        real = monotonic_counter();
++        if (multiplier < SPEEDHACK_MULTIPLIER_MIN || multiplier > SPEEDHACK_MULTIPLIER_MAX) return real;
 +    }
 +    return speedhack_scale_time( real, multiplier, real_anchor, fake_anchor );
 +}
@@ -118,7 +139,7 @@ index 67ab945..a952eee 100644
  #ifdef __linux__
  
  #define USE_FUTEX
-@@ -2311,7 +2366,7 @@ NTSTATUS WINAPI NtQueryTimer( HANDLE handle, TIMER_INFORMATION_CLASS class,
+@@ -2311,7 +2387,7 @@ NTSTATUS WINAPI NtQueryTimer( HANDLE handle, TIMER_INFORMATION_CLASS class,
          if (basic_info->RemainingTime.QuadPart > 0) NtQuerySystemTime( &now );
          else
          {
@@ -127,7 +148,7 @@ index 67ab945..a952eee 100644
              basic_info->RemainingTime.QuadPart = -basic_info->RemainingTime.QuadPart;
          }
  
-@@ -2508,7 +2563,7 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
+@@ -2508,7 +2584,7 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
   */
  NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER *frequency )
  {
@@ -209,7 +230,7 @@ index aa71e6d..a0ccc56 100644
  
      atomic_store_long(&user_shared_data->TickCount.High2Time, tick_count >> 32);
      atomic_store_ulong(&user_shared_data->TickCount.LowPart, tick_count);
-@@ -3333,3 +3344,41 @@ DECL_HANDLER(set_fd_eof_info)
+@@ -3333,3 +3344,44 @@ DECL_HANDLER(set_fd_eof_info)
          release_object( fd );
      }
  }
@@ -238,6 +259,8 @@ index aa71e6d..a0ccc56 100644
 +    /* make the sequence odd before sampling the clock, so that clients reading the
 +     * old parameters can never observe a time past the new anchor */
 +    __atomic_store_n( &shm->seq, shm->seq + 1, __ATOMIC_SEQ_CST );
++    /* the parameter stores below must not become visible before the odd sequence */
++    __atomic_thread_fence( __ATOMIC_SEQ_CST );
 +
 +    now = monotonic_counter();
 +    speedhack_fake_anchor = speedhack_time( now );
@@ -247,6 +270,7 @@ index aa71e6d..a0ccc56 100644
 +    shm->multiplier  = speedhack_multiplier;
 +    shm->real_anchor = speedhack_real_anchor;
 +    shm->fake_anchor = speedhack_fake_anchor;
++    /* a release store: the parameters are visible before the sequence becomes even again */
 +    __atomic_store_n( &shm->seq, shm->seq + 1, __ATOMIC_SEQ_CST );
 +
 +    set_current_time();
